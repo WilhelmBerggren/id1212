@@ -93,6 +93,7 @@ class GameInstance implements Runnable {
             output = new PrintWriter(clientSocket.getOutputStream(), true);
             output.println("Connected");
             this.game = new Game(words);
+            output.println("Type 'guess <letter/word>' to begin");
             output.println(this.game.status());
             String[] guess;
             while (connected) {
@@ -214,7 +215,7 @@ class Game {
     
     String status() {
         if(lives == 0) {
-            return "You lose";
+            return "You lose. Word was "+word;
         }
         if(hiddenWord.equals(word)) {
             return "You win";
