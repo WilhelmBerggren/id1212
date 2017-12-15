@@ -5,97 +5,162 @@
  */
 package hangman;
 
-import java.io.BufferedReader;
 import java.io.IOException;
-import java.io.InputStreamReader;
-import java.io.PrintWriter;
-import java.io.UncheckedIOException;
 import java.net.InetSocketAddress;
-import java.net.Socket;
+import java.net.SocketAddress;
+import java.nio.ByteBuffer;
+import java.nio.channels.SelectionKey;
+import java.nio.channels.Selector;
+import java.nio.channels.SocketChannel;
+import java.util.ArrayDeque;
+import java.util.Queue;
 import java.util.Scanner;
-import java.util.concurrent.CompletableFuture;
 
 /**
  *
  * @author Wilhelm
  */
 public class Client implements Runnable {
-
-    private static String serverAddress;
-    private final Socket socket;
-    private final BufferedReader input;
-    private final PrintWriter output;
+    private final SynchronizedOut output = new SynchronizedOut();
     private boolean receivingCmds = false;
     private final Scanner console = new Scanner(System.in);
     private Boolean connected = false;
-    private final int port = 8080;
+    private Server server;
     
     public static void main(String[] args) throws Exception {
-        serverAddress = (args.length == 0) ? "localhost" : args[0];
-        Client client = new Client(serverAddress);
-        client.start();
+        new Client().start();
     }
-    
-    public Client(String serverAddress) throws Exception {
-        socket = new Socket(serverAddress, port);
-        input = new BufferedReader(new InputStreamReader(socket.getInputStream()));
-        output = new PrintWriter(socket.getOutputStream(), true);
-    }
+    private InetSocketAddress serverAddress;
 
     private void start() {
         if(receivingCmds) {
             return;
         }
         receivingCmds = true;
+        server = new Server();
         new Thread(this).start();
-        new Thread(new Listener()).start();
     }
 
     @Override
     public void run() {
-        if(!connected) {
-            connect();
-        }
         while (receivingCmds) {
             try {
                 String msg = console.nextLine();
-                CompletableFuture.runAsync(() -> output.println(msg));
+                String[] args = msg.split(" ");
+                switch (args[0]) {
+                    case "quit":
+                        receivingCmds = false;
+                        server.disconnect();
+                        break;
+                    case "connect":
+                        server.connect(args[1]);
+                        break;
+                    default:
+                        server.send(msg);
+                }
             }
-            catch (Exception e) { }
+            catch (Exception e) { 
+                output.println("Error: "+e);
+            }
         }
     }
     
-    public void connect() {
-        CompletableFuture.runAsync(() -> {
-            try {
-                socket.connect(new InetSocketAddress(serverAddress, port));
-                connected = true;
-            }
-            catch (IOException e) {
-                throw new UncheckedIOException(e);
-            }
-        });
+    public void connect(String host, int port) {
+        serverAddress = new InetSocketAddress(host,port);
+        new Thread(this).start();
     }
     
-    private class Listener implements Runnable {
+    public void disconnect() throws IOException {
+        connected = false;
+    }
+    
+    private class Server implements Runnable {
+        
+        private SocketChannel socketChannel;
+        private InetSocketAddress serverAddress;
+        private Selector selector;
+        private final ByteBuffer fromServer = ByteBuffer.allocateDirect(1024);
+        private final Queue<ByteBuffer> toServer = new ArrayDeque<>();
+        private volatile boolean timeToSend = false;
 
         @Override
         public void run() {
-            while(true) {
-                try {
-                    String in = input.readLine();
-                    if(in == null) 
-                        break;
-                    CompletableFuture.runAsync(() -> 
-                        System.out.println(in)
-                    );
-                }
-                catch (IOException e) {
-                    CompletableFuture.runAsync(() -> System.out.println("Disconnected"));
-                    break;
+            try {
+                socketChannel = SocketChannel.open();
+                socketChannel.configureBlocking(false);
+                socketChannel.connect(serverAddress);
+                connected = true;
+                
+                selector = Selector.open();
+                socketChannel.register(selector, SelectionKey.OP_CONNECT);
+                selector.select();
+                
+                while (connected || !toServer.isEmpty()) {
+                    if (timeToSend) {
+                        socketChannel.keyFor(selector).interestOps(SelectionKey.OP_WRITE);
+                    }
+                    
+                    for (SelectionKey key : selector.selectedKeys()) {
+                        selector.selectedKeys().remove(key);
+                        if (!key.isValid()) {
+                            continue;
+                        }
+                        if (key.isConnectable()) {
+                            socketChannel.finishConnect();
+                            key.interestOps(SelectionKey.OP_READ);
+                            output.println("Connected");
+                        }
+                        else if (key.isReadable()) {
+                            fromServer.clear();
+                            int bytes = socketChannel.read(fromServer);
+                            if(bytes == -1) {
+                                throw new IOException("Lost Connection");
+                            }
+                            fromServer.flip();
+                            output.println(new String(fromServer.array()));
+
+                        }
+
+                    }
                 }
             }
+            catch (Exception e) {
+                System.err.println("Lost connection "+e);
+            }
+        }
+
+        private void disconnect() {
+            throw new UnsupportedOperationException("Not supported yet."); //To change body of generated methods, choose Tools | Templates.
+        }
+
+        private void connect(String arg) {
+            throw new UnsupportedOperationException("Not supported yet."); //To change body of generated methods, choose Tools | Templates.
+        }
+
+        private void send(String msg) {
+            throw new UnsupportedOperationException("Not supported yet."); //To change body of generated methods, choose Tools | Templates.
         }
         
+    }
+    
+    private class Listener {
+        public void receive(String msg) {
+            output.println(msg);
+        }
+        public void connected() {
+            output.println("Connected");
+        }
+        public void disconnected() {
+            output.println("Disconnected");
+        }
+    }
+    
+    private class SynchronizedOut {
+        synchronized void print(String out) {
+            System.out.print(out);
+        }
+        synchronized void println(String out) {
+            System.out.println(out);
+        }
     }
 }

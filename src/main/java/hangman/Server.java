@@ -7,9 +7,15 @@ import java.io.FileNotFoundException;
 import java.io.IOException;
 import java.io.InputStreamReader;
 import java.io.PrintWriter;
+import java.net.InetSocketAddress;
 import java.net.ServerSocket;
 import java.net.Socket;
+import java.nio.channels.SelectionKey;
+import java.nio.channels.Selector;
+import java.nio.channels.ServerSocketChannel;
+import java.nio.channels.SocketChannel;
 import java.util.ArrayList;
+import java.util.Iterator;
 import java.util.Random;
 
 /**
@@ -17,6 +23,8 @@ import java.util.Random;
  * @author Wilhelm
  */
 public class Server {
+    private Selector selector;
+    private ServerSocketChannel listeningSocketChannel;
     
     public static void main(String[] args) {
         Server server = new Server();
@@ -25,201 +33,163 @@ public class Server {
     
     private void serve() {
         try {
-            ServerSocket listeningSocket = new ServerSocket(8080);
-            Words words = new Words("words.txt");
-            while(true) {
-                Socket clientSocket = listeningSocket.accept();
-                GameInstance game = new GameInstance(this, clientSocket, words);
-                Thread handlerThread = new Thread(game);
-                System.out.println("Starting new game");
-                handlerThread.start();
+            selector = Selector.open();
+            selector.select();
+            
+            listeningSocketChannel = ServerSocketChannel.open();
+            listeningSocketChannel.configureBlocking(false);
+            listeningSocketChannel.bind(new InetSocketAddress(8080));
+            listeningSocketChannel.register(selector, SelectionKey.OP_ACCEPT);
+            
+            Iterator<SelectionKey> iterator = selector.selectedKeys().iterator();
+            
+            while(iterator.hasNext()) {
+                SelectionKey key = iterator.next();
+                iterator.remove();
+                
+                if (!key.isValid()) {
+                        continue;
+                    }
+                    if (key.isAcceptable()) {
+                        ServerSocketChannel serverSocketChannel = (ServerSocketChannel) key.channel();
+                        SocketChannel clientChannel = serverSocketChannel.accept();
+                        clientChannel.configureBlocking(false);
+                        ClientHandler handler = new ClientHandler(this, clientChannel);
+                        clientChannel.register(selector, SelectionKey.OP_WRITE, 
+                                new Client(handler));
+                    } else if (key.isReadable()) {
+                        recvFromClient(key);
+                    } else if (key.isWritable()) {
+                        sendToClient(key);
+                    }
             }
         }
-        catch (IOException e) {
+        catch (Exception e) {
             System.out.println("Server failure "+e);
         }
     }
-}
 
-class Words {
-    private final ArrayList<String> words = new ArrayList<String>();
+    private static class ClientHandler implements Runnable {
 
-    Words(String path) {
-        try {
-            BufferedReader br = new BufferedReader(
-                                    new InputStreamReader(
-                                        new FileInputStream(path)));
-            String line;
-            while((line = br.readLine()) != null) {
-                words.add(line);
+        private final Server server;
+        private final SocketChannel clientChannel;
+
+        ClientHandler(Server server, SocketChannel clientChannel) {
+            this.server = server;
+            this.clientChannel = clientChannel;
+        }
+
+        @Override
+        public void run() {
+            while()
+        }
+    }
+
+    class Game {
+        private final Words words = new Words("words.txt");
+        private final String word;
+        private String hiddenWord;
+        private int lives;
+        boolean finished = false;
+        boolean lost = false;
+        private final ArrayList<String> guesses;
+        private final ArrayList<String> help;
+
+        Game() {
+            this.guesses = new ArrayList<>();
+            this.help = new ArrayList<>();
+            this.word = words.getWord();
+            this.hiddenWord = word.replaceAll(".","_");
+            this.lives = word.length();
+        }
+
+        void makeGuess(String input) {
+            if(input.equals(word)) { 
+                finished = true;
+                return; 
             }
-            br.close();
-        }
-        catch (FileNotFoundException e) {
-            System.out.println("No words file found");
-        }
-        catch (IOException f) {
-            System.out.println("Error reading line in words file");
-        }
-    }
-
-    String getWord() {
-        Random rand = new Random();
-        int index = rand.nextInt(words.size());
-        return words.get(index);
-    }
-}
-
-class GameInstance implements Runnable {
-
-    private boolean connected;
-    private final Socket clientSocket;
-    private BufferedReader input;
-    private PrintWriter output;
-    private final Words words;
-    private Game game;
-    int score = 0;
-
-    GameInstance(Server server, Socket clientSocket, Words words) {
-        this.clientSocket = clientSocket;
-        this.words = words;
-        connected = true;
-    }
-
-    @Override
-    public void run() {
-        try {
-            input = new BufferedReader(new InputStreamReader(clientSocket.getInputStream()));
-            output = new PrintWriter(clientSocket.getOutputStream(), true);
-            output.println("Connected");
-            this.game = new Game(words);
-            output.println("Type 'guess <letter/word>' to begin");
-            output.println(this.game.status());
-            String[] guess;
-            while (connected) {
-                guess = input.readLine().split(" ");
-                if(guess.length == 1) {
-                    if(guess[0].equals("quit")) {
-                        try {
-                            clientSocket.close();
-                        }
-                        catch (IOException e) {
-                            e.printStackTrace();
-                        }
-                    }
-                    else {
-                        output.println("Error parsing command");
+            boolean wrongGuess = false;
+            if(input.length() == 1) { 
+                char guess = input.charAt(0); 
+                char[] updatedHiddenWord = hiddenWord.toCharArray();
+                int change = 0;
+                for(int i = 0; i < word.length(); i++) {
+                    char c;
+                    if((c = word.charAt(i)) == guess) {
+                        updatedHiddenWord[i] = c;
+                        change++;
                     }
                 }
-                else if(guess.length == 2 && guess[0].equals("guess")) {
-                    game.makeGuess(guess[1]);
-                    output.println(game.status());
-                    if(game.finished) {
-                        if(game.lost)   { score--; }
-                        else            { score++; }
-                        
-                        this.game = new Game(words);
-                        output.println(game.status() + " Score: "+score);
-                    }
+                if(change == 0) {
+                    wrongGuess = true;
                 }
-                else {
-                    output.println("Error parsing command");
-                }
-                
+                hiddenWord = new String(updatedHiddenWord);
             }
-        }
-        catch (IOException e) {
-            System.out.println("Disconnected: "+e);
-        }
-        finally {
-            try {
-                clientSocket.close();
-            }
-            catch (IOException e) {
-                e.printStackTrace();
-            }
-            connected = false;
-            System.out.println("User disconnected");
-        }
-    }
-}
-
-class Game {
-    private final Words words;
-    private final String word;
-    private String hiddenWord;
-    private int lives;
-    boolean finished = false;
-    boolean lost = false;
-    private final ArrayList<String> guesses;
-    private final ArrayList<String> help;
-    
-    Game(Words words) {
-        this.guesses = new ArrayList<>();
-        this.help = new ArrayList<>();
-        this.words = words;
-        this.word = words.getWord();
-        this.hiddenWord = word.replaceAll(".","_");
-        this.lives = word.length();
-    }
-    
-    void makeGuess(String input) {
-        if(input.equals(word)) { 
-            finished = true;
-            return; 
-        }
-        boolean wrongGuess = false;
-        if(input.length() == 1) { 
-            char guess = input.charAt(0); 
-            char[] updatedHiddenWord = hiddenWord.toCharArray();
-            int change = 0;
-            for(int i = 0; i < word.length(); i++) {
-                char c;
-                if((c = word.charAt(i)) == guess) {
-                    updatedHiddenWord[i] = c;
-                    change++;
-                }
-            }
-            if(change == 0) {
+            else {
                 wrongGuess = true;
             }
-            hiddenWord = new String(updatedHiddenWord);
-        }
-        else {
-            wrongGuess = true;
-        }
-        if(wrongGuess) {
-            lives--;
-            if(lives == 0) {
-                lost = true;
-                finished = true;
+            if(wrongGuess) {
+                lives--;
+                if(lives == 0) {
+                    lost = true;
+                    finished = true;
+                }
+                guesses.add(suggestion());
+                guesses.add(input);
             }
-            guesses.add(suggestion());
-            guesses.add(input);
         }
-    }
-    
-    String suggestion() {
-        Random rand = new Random();
-        char c;
-        String notTheWord;
-        while(true) {
-            c = (char) (rand.nextInt('z' - 'a') + 'a');
-            if(word.contains(c+"") && !guesses.contains(c+""))
-                return c+"";
-            notTheWord = words.getWord();
-            if(!word.equals(notTheWord) && word.length() == notTheWord.length())
-                return notTheWord;
+
+        String suggestion() {
+            Random rand = new Random();
+            char c;
+            String notTheWord;
+            while(true) {
+                c = (char) (rand.nextInt('z' - 'a') + 'a');
+                if(word.contains(c+"") && !guesses.contains(c+""))
+                    return c+"";
+                notTheWord = words.getWord();
+                if(!word.equals(notTheWord) && word.length() == notTheWord.length())
+                    return notTheWord;
+            }
         }
-    }
-    
-    String status() {
-        if(lives == 0) {
-            return "You lose. Word was "+word;
+
+        String status() {
+            if(lives == 0) {
+                return "You lose. Word was "+word;
+            }
+            if(hiddenWord.equals(word)) {
+                return "You win";
+            }
+            return hiddenWord+ " Lives: "+lives+" Not in word: "+guesses.toString();
         }
-        if(hiddenWord.equals(word)) {
-            return "You win";
+
+
+        private class Words {
+            private ArrayList<String> words = new ArrayList<>();
+
+            Words(String path) {
+                try {
+                    BufferedReader br = new BufferedReader(
+                                            new InputStreamReader(
+                                                new FileInputStream(path)));
+                    String line;
+                    while((line = br.readLine()) != null) {
+                        words.add(line);
+                    }
+                    br.close();
+                }
+                catch (Exception e) {
+                    System.out.println("Error reading file "+e);
+                }
+            }
+
+            String getWord() {
+                Random rand = new Random();
+                int index = rand.nextInt(words.size());
+                String word = words.get(index);
+                words.remove(index);
+                return word;
+            }
         }
-        return hiddenWord+ " Lives: "+lives+" Not in word: "+guesses.toString();
     }
 }
